@@ -1,0 +1,1107 @@
+# =============================================================================
+#  PYSPARK COMPLETE TUTORIAL
+#  Covers: DDL · DML · Aggregate · Window · String · Math · Date · Regex
+#          Conditional · Array/Map · CTE · UDF · Performance
+#  Use cases range from simple to advanced / production-grade patterns
+# =============================================================================
+
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql import Window
+from pyspark.sql.types import (
+    StructType, StructField,
+    StringType, IntegerType, LongType, DoubleType,
+    BooleanType, DateType, TimestampType,
+    ArrayType, MapType
+)
+import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0. SPARKSESSION
+# ─────────────────────────────────────────────────────────────────────────────
+spark = (
+    SparkSession.builder
+    .appName("PySpark_Complete_Tutorial")
+    .config("spark.sql.shuffle.partitions", "8")          # low for local dev
+    .config("spark.sql.adaptive.enabled", "true")
+    .config("spark.sql.repl.eagerEval.enabled", "true")   # pretty show() in notebooks
+    .getOrCreate()
+)
+spark.sparkContext.setLogLevel("WARN")
+print(f"Spark version: {spark.version}")
+
+
+# =============================================================================
+# SECTION 1 – SAMPLE DATA
+# =============================================================================
+
+# ── Employees ────────────────────────────────────────────────────────────────
+emp_data = [
+    (1,  "Alice",   "Engineering", "F", 95000.0,  7, "2017-03-15", True),
+    (2,  "Bob",     "Marketing",   "M", 72000.0,  5, "2019-06-01", True),
+    (3,  "Carol",   "Engineering", "F", 115000.0, 9, "2015-01-20", True),
+    (4,  "Dave",    "HR",          "M", 68000.0,  2, "2022-08-10", True),
+    (5,  "Eve",     "Marketing",   "F", 80000.0,  4, "2020-11-05", True),
+    (6,  "Frank",   "Engineering", "M", 99000.0,  6, "2018-05-22", False),
+    (7,  "Grace",   "HR",          "F", 73000.0,  3, "2021-02-14", True),
+    (8,  "Hank",    "Finance",     "M", 88000.0,  8, "2016-09-30", True),
+    (9,  "Iris",    "Finance",     "F", 91000.0,  6, "2018-12-01", True),
+    (10, "Jack",    "Marketing",   "M", 65000.0,  1, "2023-04-17", True),
+    (11, "Karen",   "Engineering", "F", None,      3, "2021-07-08", True),   # null salary
+    (12, "Leo",     "Finance",     "M", 102000.0, 10,"2014-03-25", False),
+]
+emp_schema = StructType([
+    StructField("emp_id",    IntegerType(),  False),
+    StructField("name",      StringType(),   True),
+    StructField("dept",      StringType(),   True),
+    StructField("gender",    StringType(),   True),
+    StructField("salary",    DoubleType(),   True),
+    StructField("yrs_exp",   IntegerType(),  True),
+    StructField("hire_date", StringType(),   True),   # kept as string to demo casting
+    StructField("is_active", BooleanType(),  True),
+])
+emp = spark.createDataFrame(emp_data, emp_schema)
+
+# ── Departments ───────────────────────────────────────────────────────────────
+dept_data = [
+    ("Engineering", "Alice M",  "San Francisco", 500000.0),
+    ("Marketing",   "Bob K",    "New York",       300000.0),
+    ("HR",          "Carol L",  "Chicago",        150000.0),
+    ("Finance",     "Dave R",   "Boston",         400000.0),
+    ("Legal",       "Eve S",    "New York",       200000.0),   # no employees → tests outer join
+]
+dept = spark.createDataFrame(
+    dept_data, ["dept", "manager", "office", "budget"]
+)
+
+# ── Sales (for date & window demos) ──────────────────────────────────────────
+sales_data = [
+    (1, 1, "Laptop",    1200.0, "2024-01-05"),
+    (2, 2, "Phone",      800.0, "2024-01-12"),
+    (3, 1, "Tablet",     450.0, "2024-02-03"),
+    (4, 3, "Laptop",    1350.0, "2024-02-14"),
+    (5, 2, "Monitor",    350.0, "2024-03-01"),
+    (6, 1, "Keyboard",   120.0, "2024-03-18"),
+    (7, 4, "Phone",      900.0, "2024-04-02"),
+    (8, 3, "Tablet",     500.0, "2024-04-20"),
+    (9, 1, "Monitor",    370.0, "2024-05-07"),
+    (10,5, "Laptop",    1100.0, "2024-05-25"),
+]
+sales = spark.createDataFrame(
+    sales_data, ["sale_id", "emp_id", "product", "amount", "sale_date"]
+)
+
+
+# =============================================================================
+# SECTION 2 – DDL  (Data Definition Language)
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 2 – DDL")
+print("="*60)
+
+# ── 2.1 Explicit schema & printSchema ─────────────────────────────────────────
+# Use case: Validate schema of raw ingestion data before processing
+print("\n[2.1] Schema:")
+emp.printSchema()
+
+# ── 2.2 Add / rename / drop / cast columns ────────────────────────────────────
+# Use case: Derive calculated columns and fix data types from raw CSV strings
+emp_clean = (
+    emp
+    .withColumn("hire_date",  F.to_date("hire_date", "yyyy-MM-dd"))         # cast string → date
+    .withColumn("annual_bonus", F.round(F.col("salary") * 0.12, 2))        # derived column
+    .withColumn("seniority",
+        F.when(F.col("yrs_exp") >= 8, "Principal")
+         .when(F.col("yrs_exp") >= 5, "Senior")
+         .when(F.col("yrs_exp") >= 2, "Mid")
+         .otherwise("Junior"))
+    .withColumnRenamed("yrs_exp", "experience_yrs")                         # rename
+    .withColumn("salary",     F.col("salary").cast(DoubleType()))            # explicit cast
+)
+print("\n[2.2] Cleaned schema after DDL transforms:")
+emp_clean.printSchema()
+
+# ── 2.3 Temp views & SQL tables ───────────────────────────────────────────────
+# Use case: Register DataFrame as SQL table so analysts can query with spark.sql()
+emp_clean.createOrReplaceTempView("employees")
+dept.createOrReplaceTempView("departments")
+sales.createOrReplaceTempView("sales")
+
+# ── 2.4 Create managed table (writes to default warehouse) ────────────────────
+# Use case: Persist a DataFrame as a Hive/Spark catalog table for cross-job reuse
+# emp_clean.write.mode("overwrite").saveAsTable("analytics.employees")  # uncomment in cluster
+
+# ── 2.5 Write as partitioned Parquet ─────────────────────────────────────────
+# Use case: Write output so BI tools can read only the partitions they need
+# (emp_clean.write
+#     .mode("overwrite")
+#     .partitionBy("dept")
+#     .option("compression", "snappy")
+#     .parquet("/tmp/employees_parquet/"))
+
+# ── 2.6 Describe / show tables ────────────────────────────────────────────────
+print("\n[2.6] Tables in catalog:")
+spark.catalog.listTables()
+
+
+# =============================================================================
+# SECTION 3 – DML  (Data Manipulation Language)
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 3 – DML")
+print("="*60)
+
+# ── 3.1 SELECT & filter ───────────────────────────────────────────────────────
+# Use case: Pull active engineers earning above $90k
+print("\n[3.1] Active engineers > $90k:")
+emp_clean.select("name", "dept", "salary", "seniority") \
+    .filter((F.col("dept") == "Engineering") &
+            (F.col("salary") > 90000) &
+            (F.col("is_active") == True)) \
+    .orderBy(F.col("salary").desc()) \
+    .show()
+
+# ── 3.2 isin / isNull / isNotNull / between ───────────────────────────────────
+# Use case: Filter to selected departments, exclude nulls, apply salary band
+print("\n[3.2] isin / isNotNull / between:")
+emp_clean.filter(
+    F.col("dept").isin(["Engineering", "Finance"]) &
+    F.col("salary").isNotNull() &
+    F.col("salary").between(85000, 120000)
+).select("name", "dept", "salary").show()
+
+# ── 3.3 All join types ─────────────────────────────────────────────────────────
+print("\n[3.3] JOIN types:")
+
+# INNER – only rows that match in both DataFrames
+print("  Inner join:")
+emp_clean.join(dept, on="dept", how="inner") \
+    .select("name", "dept", "salary", "manager", "office") \
+    .show(5)
+
+# LEFT – all employees, nulls for depts with no match
+print("  Left join:")
+emp_clean.join(dept, on="dept", how="left") \
+    .select("name", "dept", "office") \
+    .show(5)
+
+# RIGHT – all departments including 'Legal' which has no employees
+print("  Right join (shows Legal with no staff):")
+emp_clean.join(dept, on="dept", how="right") \
+    .select("name", "dept", "office") \
+    .show()
+
+# FULL OUTER – everything from both sides
+print("  Full outer join:")
+emp_clean.join(dept, on="dept", how="full") \
+    .select("name", "dept", "office") \
+    .show(5)
+
+# LEFT SEMI – employees whose dept exists in dept table (like IN subquery)
+print("  Left semi join:")
+emp_clean.join(dept, on="dept", how="left_semi") \
+    .select("name", "dept").show(5)
+
+# LEFT ANTI – employees whose dept does NOT exist in dept table
+print("  Left anti join:")
+emp_clean.join(dept, on="dept", how="left_anti") \
+    .select("name", "dept").show()
+
+# BROADCAST – force small table to be broadcast (avoids shuffle)
+print("  Broadcast join (perf optimisation):")
+emp_clean.join(F.broadcast(dept), on="dept", how="inner") \
+    .select("name", "dept", "manager").show(3)
+
+# ── 3.4 Union / intersect / except ────────────────────────────────────────────
+# Use case: Combine two regional datasets; find records unique to one source
+print("\n[3.4] Union / intersect / except:")
+eng = emp_clean.filter(F.col("dept") == "Engineering").select("name", "dept", "salary")
+fin = emp_clean.filter(F.col("dept") == "Finance").select("name", "dept", "salary")
+
+eng.unionByName(fin).show()             # stack rows, match by column name
+eng.union(fin).show()                   # stack rows, match by position
+
+# ── 3.5 Sort / limit / distinct / deduplicate ─────────────────────────────────
+print("\n[3.5] Sort / limit / dropDuplicates:")
+emp_clean.orderBy(F.desc("salary"), F.asc("name")).limit(5).show()
+emp_clean.select("dept").distinct().show()
+emp_clean.dropDuplicates(["dept", "gender"]).select("dept", "gender", "name").show()
+
+# ── 3.6 Null handling ─────────────────────────────────────────────────────────
+# Use case: Replace null salaries with dept average before ML feature engineering
+print("\n[3.6] Null handling:")
+emp_clean.fillna({"salary": 0.0, "dept": "Unknown"}).show(3)
+emp_clean.dropna(how="any", subset=["salary"]).show(3)
+emp_clean.withColumn(
+    "salary_safe", F.coalesce(F.col("salary"), F.lit(0.0))
+).select("name", "salary", "salary_safe").show(5)
+
+# ── 3.7 Pivot table ───────────────────────────────────────────────────────────
+# Use case: Cross-tab of dept × gender headcount for diversity report
+print("\n[3.7] Pivot (dept × gender headcount):")
+emp_clean.groupBy("dept").pivot("gender", ["F", "M"]).count().show()
+
+# ── 3.8 Unpivot (stack) ───────────────────────────────────────────────────────
+# Use case: Normalise wide monthly-revenue columns back to rows for time-series analysis
+print("\n[3.8] Unpivot (wide → long):")
+wide = emp_clean.select("name", "salary", "annual_bonus")
+# Simulate via selectExpr stack (compatible with Spark 3.x)
+wide.selectExpr(
+    "name",
+    "stack(2, 'salary', salary, 'bonus', annual_bonus) as (metric, value)"
+).show(6)
+
+
+# =============================================================================
+# SECTION 4 – AGGREGATE FUNCTIONS
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 4 – AGGREGATE FUNCTIONS")
+print("="*60)
+
+# ── 4.1 Core groupBy + agg ────────────────────────────────────────────────────
+# Use case: HR payroll summary by department
+print("\n[4.1] Payroll summary by dept:")
+emp_clean.groupBy("dept").agg(
+    F.count("*").alias("headcount"),
+    F.count("salary").alias("non_null_salaries"),
+    F.countDistinct("gender").alias("gender_count"),
+    F.sum("salary").alias("total_payroll"),
+    F.avg("salary").alias("avg_salary"),
+    F.min("salary").alias("min_salary"),
+    F.max("salary").alias("max_salary"),
+    (F.max("salary") - F.min("salary")).alias("salary_range"),
+    F.round(F.stddev_samp("salary"), 2).alias("salary_stddev"),
+    F.round(F.variance("salary"), 2).alias("salary_variance"),
+    F.collect_list("name").alias("all_employees"),
+    F.collect_set("seniority").alias("seniority_levels"),
+    F.first("name", ignorenulls=True).alias("first_hire_alpha"),
+    F.last("name",  ignorenulls=True).alias("last_hire_alpha"),
+).orderBy("dept").show(truncate=False)
+
+# ── 4.2 Approximate aggregations (production scale) ───────────────────────────
+# Use case: Count distinct users in a billion-row event log cheaply
+print("\n[4.2] Approximate stats:")
+emp_clean.agg(
+    F.approx_count_distinct("name", rsd=0.01).alias("approx_unique_employees"),
+    F.percentile_approx("salary", 0.5).alias("median_salary"),
+    F.percentile_approx("salary", [0.25, 0.75, 0.90, 0.99]).alias("salary_percentiles"),
+    F.round(F.corr("salary", "experience_yrs"), 4).alias("salary_exp_correlation"),
+    F.round(F.covar_samp("salary", "experience_yrs"), 2).alias("covariance"),
+    F.round(F.skewness("salary"), 4).alias("skewness"),
+    F.round(F.kurtosis("salary"), 4).alias("kurtosis"),
+).show(truncate=False)
+
+# ── 4.3 ROLLUP – hierarchical subtotals ──────────────────────────────────────
+# Use case: Finance report with dept totals + grand total row
+print("\n[4.3] Rollup (dept subtotals + grand total):")
+emp_clean.rollup("dept", "gender").agg(
+    F.sum("salary").alias("total_salary"),
+    F.grouping_id("dept", "gender").alias("grouping_level"),  # 0=leaf, 1=dept, 3=grand
+).orderBy("grouping_level", "dept").show()
+
+# ── 4.4 CUBE – all combination subtotals ─────────────────────────────────────
+# Use case: Multi-dimensional sales cube for OLAP drill-down
+print("\n[4.4] Cube (dept × gender all combos):")
+emp_clean.cube("dept", "gender").agg(
+    F.count("*").alias("headcount"),
+    F.avg("salary").alias("avg_salary"),
+).orderBy("dept", "gender").show()
+
+# ── 4.5 HAVING equivalent ────────────────────────────────────────────────────
+# Use case: Only show depts with avg salary above $85k and at least 2 staff
+print("\n[4.5] HAVING equivalent (filter after agg):")
+(emp_clean.groupBy("dept")
+    .agg(F.avg("salary").alias("avg_sal"), F.count("*").alias("cnt"))
+    .filter((F.col("avg_sal") > 85000) & (F.col("cnt") >= 2))
+    .orderBy(F.desc("avg_sal"))
+    .show())
+
+
+# =============================================================================
+# SECTION 5 – WINDOW FUNCTIONS
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 5 – WINDOW FUNCTIONS")
+print("="*60)
+
+# Window specs
+w_sal    = Window.partitionBy("dept").orderBy(F.col("salary").desc())
+w_full   = Window.partitionBy("dept")                                 # no ordering → whole partition
+w_rows   = w_sal.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+w_slide  = w_sal.rowsBetween(-1, 1)                                   # 3-row rolling window
+w_global = Window.orderBy(F.col("salary").desc())                     # no partition → global
+
+# ── 5.1 Ranking ───────────────────────────────────────────────────────────────
+# Use case: Assign bonus tiers — top earner per dept gets Tier 1
+print("\n[5.1] Ranking functions:")
+emp_clean.filter(F.col("salary").isNotNull()).withColumn(
+    "rank",        F.rank().over(w_sal)          # gaps on ties
+).withColumn(
+    "dense_rank",  F.dense_rank().over(w_sal)    # no gaps on ties
+).withColumn(
+    "row_number",  F.row_number().over(w_sal)    # unique, no ties
+).withColumn(
+    "ntile_4",     F.ntile(4).over(w_sal)        # salary quartile within dept
+).withColumn(
+    "pct_rank",    F.round(F.percent_rank().over(w_sal), 3)
+).withColumn(
+    "cume_dist",   F.round(F.cume_dist().over(w_sal), 3)
+).select("name","dept","salary","rank","dense_rank","row_number","ntile_4","pct_rank").show()
+
+# ── 5.2 Top-N per group ───────────────────────────────────────────────────────
+# Use case: Send promotion email to top 2 earners in each department
+print("\n[5.2] Top-2 earners per dept:")
+(emp_clean.filter(F.col("salary").isNotNull())
+    .withColumn("rn", F.row_number().over(w_sal))
+    .filter(F.col("rn") <= 2)
+    .select("dept","name","salary","rn")
+    .orderBy("dept","rn")
+    .show())
+
+# ── 5.3 Lag / Lead ────────────────────────────────────────────────────────────
+# Use case: Calculate salary delta vs previous and next employee in dept
+print("\n[5.3] Lag / Lead:")
+emp_clean.filter(F.col("salary").isNotNull()).withColumn(
+    "prev_salary",  F.lag("salary", 1, 0.0).over(w_sal)
+).withColumn(
+    "next_salary",  F.lead("salary", 1, 0.0).over(w_sal)
+).withColumn(
+    "delta_prev",   F.round(F.col("salary") - F.col("prev_salary"), 2)
+).select("name","dept","salary","prev_salary","next_salary","delta_prev").show()
+
+# ── 5.4 Running aggregates ────────────────────────────────────────────────────
+# Use case: Cumulative payroll spend as new employees are hired (sorted by salary desc)
+print("\n[5.4] Running / cumulative aggregates:")
+emp_clean.filter(F.col("salary").isNotNull()).withColumn(
+    "running_payroll",  F.sum("salary").over(w_rows)
+).withColumn(
+    "running_avg",      F.round(F.avg("salary").over(w_rows), 2)
+).withColumn(
+    "dept_total",       F.sum("salary").over(w_full)
+).withColumn(
+    "pct_of_dept",      F.round(F.col("salary") / F.sum("salary").over(w_full) * 100, 1)
+).select("name","dept","salary","running_payroll","dept_total","pct_of_dept").show()
+
+# ── 5.5 Sliding / rolling window ─────────────────────────────────────────────
+# Use case: 3-row rolling average salary (smooth out outliers in ranking)
+print("\n[5.5] 3-row rolling average:")
+emp_clean.filter(F.col("salary").isNotNull()).withColumn(
+    "rolling_avg_3", F.round(F.avg("salary").over(w_slide), 2)
+).withColumn(
+    "rolling_max_3", F.max("salary").over(w_slide)
+).select("name","dept","salary","rolling_avg_3","rolling_max_3").show()
+
+# ── 5.6 First / Last value ────────────────────────────────────────────────────
+# Use case: Tag every row with the highest earner's name in the same dept
+print("\n[5.6] First / Last in partition:")
+emp_clean.filter(F.col("salary").isNotNull()).withColumn(
+    "dept_top_earner", F.first("name").over(w_sal)   # first after ordering by salary desc
+).withColumn(
+    "dept_lowest",     F.last("name").over(w_rows)
+).select("name","dept","salary","dept_top_earner","dept_lowest").show()
+
+# ── 5.7 Window on sales data (time-series) ────────────────────────────────────
+# Use case: Month-over-month revenue change per employee
+print("\n[5.7] Sales MoM delta per employee:")
+sales_ts = sales.withColumn("sale_date", F.to_date("sale_date"))
+w_emp_time = Window.partitionBy("emp_id").orderBy("sale_date")
+sales_ts.withColumn(
+    "prev_amount", F.lag("amount", 1).over(w_emp_time)
+).withColumn(
+    "mom_delta", F.round(F.col("amount") - F.col("prev_amount"), 2)
+).withColumn(
+    "cum_revenue", F.round(F.sum("amount").over(
+        w_emp_time.rowsBetween(Window.unboundedPreceding, Window.currentRow)), 2)
+).show()
+
+
+# =============================================================================
+# SECTION 6 – STRING FUNCTIONS
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 6 – STRING FUNCTIONS")
+print("="*60)
+
+str_data = [
+    (1, "  Alice Johnson  ", "alice.johnson@company.com", "Engineering | Senior | SF"),
+    (2, "BOB SMITH",         "BOB.SMITH@COMPANY.COM",     "Marketing | Mid | NYC"),
+    (3, "carol  lee",        "carol.lee@gmail.com",        "HR | Junior | Chicago"),
+    (4, "Dave O'Brien",      "dave.obrien@co.uk",          "Finance | Principal | Boston"),
+]
+str_df = spark.createDataFrame(str_data, ["id", "name", "email", "metadata"])
+
+# ── 6.1 Case & whitespace ─────────────────────────────────────────────────────
+# Use case: Normalise free-text name fields from multiple source systems
+print("\n[6.1] Case & whitespace normalisation:")
+str_df.withColumn("name_lower",   F.lower(F.trim("name"))) \
+      .withColumn("name_upper",   F.upper(F.trim("name"))) \
+      .withColumn("name_initcap", F.initcap(F.trim("name"))) \
+      .withColumn("email_lower",  F.lower("email")) \
+      .select("id", "name", "name_lower", "name_initcap", "email_lower") \
+      .show(truncate=False)
+
+# ── 6.2 Substring / position / length ────────────────────────────────────────
+# Use case: Extract domain from email; get initials from name
+print("\n[6.2] Substring / position / length:")
+str_df.withColumn("name_clean",  F.initcap(F.trim("name"))) \
+      .withColumn("first_name",  F.split(F.trim("name"), " ").getItem(0)) \
+      .withColumn("last_name",   F.split(F.trim("name"), " ").getItem(1)) \
+      .withColumn("email_user",  F.substring_index("email", "@", 1)) \
+      .withColumn("email_domain",F.substring_index("email", "@", -1)) \
+      .withColumn("name_len",    F.length(F.trim("name"))) \
+      .withColumn("at_position", F.instr("email", "@")) \
+      .select("id","first_name","last_name","email_user","email_domain","name_len","at_position") \
+      .show(truncate=False)
+
+# ── 6.3 Split / concat / format ──────────────────────────────────────────────
+# Use case: Parse pipe-delimited metadata column; build display labels
+print("\n[6.3] Split / concat / format:")
+str_df.withColumn("parts",      F.split("metadata", " \\| ")) \
+      .withColumn("dept_parsed",F.col("parts").getItem(0)) \
+      .withColumn("level",      F.col("parts").getItem(1)) \
+      .withColumn("city",       F.col("parts").getItem(2)) \
+      .withColumn("label",      F.concat_ws(" – ", F.initcap(F.trim("name")), F.col("parts").getItem(1))) \
+      .withColumn("formatted",  F.format_string("ID-%03d: %s", F.col("id"), F.initcap(F.trim("name")))) \
+      .select("id","dept_parsed","level","city","label","formatted") \
+      .show(truncate=False)
+
+# ── 6.4 Replace / translate / pad / repeat ────────────────────────────────────
+# Use case: Mask PII, align columns in fixed-width report, sanitise text
+print("\n[6.4] Replace / pad / repeat:")
+str_df.withColumn("masked_email", F.regexp_replace("email", r"(?<=.{2})[^@]+(?=@)", "***")) \
+      .withColumn("padded_id",    F.lpad(F.col("id").cast("string"), 6, "0")) \
+      .withColumn("padded_name",  F.rpad(F.initcap(F.trim("name")), 20, ".")) \
+      .withColumn("sep",          F.repeat("-", 10)) \
+      .withColumn("reversed",     F.reverse(F.initcap(F.trim("name")))) \
+      .select("id","masked_email","padded_id","padded_name","sep","reversed") \
+      .show(truncate=False)
+
+# ── 6.5 Hashing & encoding ────────────────────────────────────────────────────
+# Use case: Anonymise email PII using SHA-256 for GDPR compliance
+print("\n[6.5] Hashing & encoding:")
+str_df.withColumn("sha256",   F.sha2(F.lower("email"), 256)) \
+      .withColumn("md5_hash", F.md5(F.lower("email"))) \
+      .withColumn("b64",      F.base64(F.encode("email", "utf-8"))) \
+      .select("id","email","sha256","md5_hash","b64") \
+      .show(truncate=False)
+
+# ── 6.6 levenshtein / soundex (fuzzy matching) ───────────────────────────────
+# Use case: Find near-duplicate names in a customer table
+print("\n[6.6] Levenshtein / soundex:")
+names_df = spark.createDataFrame([
+    ("Alice", "Alise"),("Robert","Roberto"),("John","Jon"),("Carol","Karl")
+], ["name_a","name_b"])
+names_df.withColumn("edit_dist", F.levenshtein("name_a","name_b")) \
+        .withColumn("soundex_a", F.soundex("name_a")) \
+        .withColumn("soundex_b", F.soundex("name_b")) \
+        .show()
+
+
+# =============================================================================
+# SECTION 7 – MATH FUNCTIONS
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 7 – MATH FUNCTIONS")
+print("="*60)
+
+num_data = [(i, float(i**2 - 5*i + 10), float(i)) for i in range(1, 11)]
+num_df = spark.createDataFrame(num_data, ["n", "value", "x"])
+
+# ── 7.1 Rounding ──────────────────────────────────────────────────────────────
+# Use case: Round financial figures to 2 decimal places for invoicing
+print("\n[7.1] Rounding functions:")
+num_df.withColumn("round2",  F.round("value", 2)) \
+      .withColumn("ceil_v",  F.ceil("value")) \
+      .withColumn("floor_v", F.floor("value")) \
+      .withColumn("bround",  F.bround("value", 1)) \
+      .select("n","value","round2","ceil_v","floor_v","bround") \
+      .show()
+
+# ── 7.2 Exponents / logarithms ────────────────────────────────────────────────
+# Use case: Log-transform skewed salary distribution for ML model
+print("\n[7.2] Exponents & logarithms:")
+emp_clean.filter(F.col("salary").isNotNull()).select(
+    "name", "salary",
+    F.round(F.log(F.col("salary")),   4).alias("ln_salary"),
+    F.round(F.log2(F.col("salary")),  4).alias("log2_salary"),
+    F.round(F.log10(F.col("salary")), 4).alias("log10_salary"),
+    F.round(F.sqrt(F.col("salary")),  4).alias("sqrt_salary"),
+    F.round(F.pow(F.col("salary"), F.lit(1/3)), 4).alias("cbrt_salary"),
+).show(5)
+
+# ── 7.3 Trigonometry ──────────────────────────────────────────────────────────
+# Use case: Haversine distance between lat/lon coordinates
+print("\n[7.3] Trig (sample values):")
+num_df.withColumn("sin_x",   F.round(F.sin("x"), 4)) \
+      .withColumn("cos_x",   F.round(F.cos("x"), 4)) \
+      .withColumn("tan_x",   F.round(F.tan("x"), 4)) \
+      .withColumn("deg",     F.round(F.degrees("x"), 2)) \
+      .select("n","x","sin_x","cos_x","tan_x","deg") \
+      .show(5)
+
+# ── 7.4 Absolute / signum / mod ───────────────────────────────────────────────
+# Use case: Normalise signed profit/loss deltas; classify positive/negative
+print("\n[7.4] abs / signum / pmod / factorial:")
+num_df.withColumn("abs_v",  F.abs("value")) \
+      .withColumn("sign_v", F.signum("value")) \
+      .withColumn("mod_3",  F.pmod("n", F.lit(3))) \
+      .select("n","value","abs_v","sign_v","mod_3") \
+      .show(5)
+
+# ── 7.5 Statistical z-score normalisation ────────────────────────────────────
+# Use case: Prepare salary as a normalised feature for ML clustering
+print("\n[7.5] Z-score normalisation by dept:")
+w_p = Window.partitionBy("dept")
+emp_clean.filter(F.col("salary").isNotNull()).withColumn(
+    "dept_mean", F.avg("salary").over(w_p)
+).withColumn(
+    "dept_std",  F.stddev("salary").over(w_p)
+).withColumn(
+    "z_score", F.round(
+        (F.col("salary") - F.col("dept_mean")) / F.col("dept_std"), 4
+    )
+).select("name","dept","salary","dept_mean","dept_std","z_score").show()
+
+# ── 7.6 Greatest / Least ─────────────────────────────────────────────────────
+# Use case: Determine the higher of salary vs market benchmark per employee
+print("\n[7.6] greatest / least:")
+emp_clean.filter(F.col("salary").isNotNull()).withColumn(
+    "benchmark", F.lit(85000.0)
+).withColumn(
+    "effective_salary", F.greatest("salary", F.lit(85000.0))
+).withColumn(
+    "lower_bound",      F.least("salary", F.lit(100000.0))
+).select("name","salary","benchmark","effective_salary","lower_bound").show(5)
+
+# ── 7.7 Random / histogram bins ──────────────────────────────────────────────
+# Use case: Random sampling; bucket salary into ranges for histogram
+print("\n[7.7] Random & salary histogram bins:")
+emp_clean.filter(F.col("salary").isNotNull()).withColumn(
+    "rand_val", F.round(F.rand(seed=42), 4)
+).withColumn(
+    "salary_bin", (F.floor(F.col("salary") / 10000) * 10000).cast("int")
+).select("name","salary","rand_val","salary_bin") \
+ .orderBy("salary_bin").show()
+
+
+# =============================================================================
+# SECTION 8 – DATE & TIME FUNCTIONS
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 8 – DATE & TIME FUNCTIONS")
+print("="*60)
+
+# ── 8.1 Parse / format ────────────────────────────────────────────────────────
+# Use case: Standardise dates from mixed-format source systems
+print("\n[8.1] Parse & format dates:")
+date_data = [
+    (1, "2024-01-15", "15/01/2024", "Jan 15 2024"),
+    (2, "2023-11-30", "30/11/2023", "Nov 30 2023"),
+    (3, "2022-07-04", "04/07/2022", "Jul 04 2022"),
+]
+date_df = spark.createDataFrame(date_data, ["id","iso_date","eu_date","us_date"])
+date_df.withColumn("parsed_iso", F.to_date("iso_date", "yyyy-MM-dd")) \
+       .withColumn("parsed_eu",  F.to_date("eu_date",  "dd/MM/yyyy")) \
+       .withColumn("parsed_us",  F.to_date("us_date",  "MMM dd yyyy")) \
+       .withColumn("fmt_output", F.date_format(F.to_date("iso_date","yyyy-MM-dd"), "EEEE, MMMM d yyyy")) \
+       .show(truncate=False)
+
+# ── 8.2 Extraction ────────────────────────────────────────────────────────────
+# Use case: Build a date dimension table for a data warehouse
+print("\n[8.2] Date part extraction:")
+emp_clean.withColumn("hire_year",    F.year("hire_date")) \
+         .withColumn("hire_month",   F.month("hire_date")) \
+         .withColumn("hire_day",     F.dayofmonth("hire_date")) \
+         .withColumn("hire_dow",     F.dayofweek("hire_date"))  \
+         .withColumn("hire_doy",     F.dayofyear("hire_date")) \
+         .withColumn("hire_week",    F.weekofyear("hire_date")) \
+         .withColumn("hire_quarter", F.quarter("hire_date")) \
+         .select("name","hire_date","hire_year","hire_month","hire_day",
+                 "hire_dow","hire_quarter","hire_week") \
+         .show(5)
+
+# ── 8.3 Arithmetic ────────────────────────────────────────────────────────────
+# Use case: Calculate employee tenure; flag employees hired in last 6 months
+print("\n[8.3] Date arithmetic:")
+today = F.current_date()
+emp_clean.withColumn("days_tenure",    F.datediff(today, "hire_date")) \
+         .withColumn("months_tenure",  F.round(F.months_between(today, "hire_date"), 1)) \
+         .withColumn("years_tenure",   F.round(F.datediff(today, "hire_date") / 365.25, 2)) \
+         .withColumn("next_anniv",     F.add_months("hire_date", 12)) \
+         .withColumn("review_date",    F.date_add("hire_date", 90)) \
+         .withColumn("is_new_hire",    F.datediff(today, "hire_date") < 180) \
+         .select("name","hire_date","days_tenure","months_tenure","years_tenure","review_date","is_new_hire") \
+         .show(truncate=False)
+
+# ── 8.4 Truncation ────────────────────────────────────────────────────────────
+# Use case: Group sales by week / month / quarter for time-series charts
+print("\n[8.4] Date truncation (sales by period):")
+sales_ts = sales.withColumn("sale_date", F.to_date("sale_date"))
+sales_ts.withColumn("week_start",    F.date_trunc("week",    F.col("sale_date"))) \
+        .withColumn("month_start",   F.date_trunc("month",   F.col("sale_date"))) \
+        .withColumn("quarter_start", F.date_trunc("quarter", F.col("sale_date"))) \
+        .select("sale_id","sale_date","product","amount",
+                "week_start","month_start","quarter_start") \
+        .show(truncate=False)
+
+# ── 8.5 Monthly revenue aggregation ──────────────────────────────────────────
+# Use case: Monthly revenue dashboard
+print("\n[8.5] Monthly revenue:")
+sales_ts.withColumn("month", F.date_format("sale_date", "yyyy-MM")) \
+        .groupBy("month") \
+        .agg(F.round(F.sum("amount"), 2).alias("revenue"),
+             F.count("*").alias("transactions")) \
+        .orderBy("month") \
+        .show()
+
+# ── 8.6 Timestamp / timezone ─────────────────────────────────────────────────
+# Use case: Convert event timestamps from UTC to US/Pacific for reporting
+print("\n[8.6] Timestamps & timezones:")
+ts_data = [(1, "2024-06-15 14:30:00"), (2, "2024-12-01 08:00:00")]
+ts_df = spark.createDataFrame(ts_data, ["id","ts_str"])
+ts_df.withColumn("ts",          F.to_timestamp("ts_str","yyyy-MM-dd HH:mm:ss")) \
+     .withColumn("ts_utc",      F.from_utc_timestamp(F.col("ts"), "UTC")) \
+     .withColumn("ts_pacific",  F.from_utc_timestamp(F.col("ts"), "US/Pacific")) \
+     .withColumn("unix_epoch",  F.unix_timestamp(F.col("ts"))) \
+     .withColumn("from_epoch",  F.from_unixtime(F.unix_timestamp(F.col("ts")))) \
+     .withColumn("hour",        F.hour(F.col("ts"))) \
+     .withColumn("minute",      F.minute(F.col("ts"))) \
+     .show(truncate=False)
+
+
+# =============================================================================
+# SECTION 9 – REGEX FUNCTIONS
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 9 – REGEX FUNCTIONS")
+print("="*60)
+
+raw_data = [
+    (1, "Alice Johnson  |  alice@example.com  | +1-555-123-4567 | Salary: $95,000"),
+    (2, "Bob Smith      |  BOB@COMPANY.ORG   | 555.987.6543    | Salary: $72,500"),
+    (3, "Carol Lee      |  carol@gmail.com   | (555) 246-8000  | Salary: $115,000"),
+    (4, "Dave O'Brien   |  dave@co.uk        | +44-20-1234-567 | Salary: $88,200"),
+]
+raw_df = spark.createDataFrame(raw_data, ["id","raw"])
+
+# ── 9.1 rlike – pattern match filter ─────────────────────────────────────────
+# Use case: Flag records with UK phone numbers or .uk domains
+print("\n[9.1] rlike – pattern matching:")
+raw_df.withColumn("has_uk_domain", F.col("raw").rlike(r"\.uk")) \
+      .withColumn("has_gmail",     F.col("raw").rlike(r"(?i)gmail")) \
+      .withColumn("has_plus_phone",F.col("raw").rlike(r"\+\d")) \
+      .select("id","has_uk_domain","has_gmail","has_plus_phone") \
+      .show()
+
+# ── 9.2 regexp_extract – capture groups ───────────────────────────────────────
+# Use case: Parse structured fields out of a single concatenated raw column
+print("\n[9.2] regexp_extract:")
+raw_df.withColumn("email",      F.regexp_extract("raw", r"[\w.+-]+@[\w.-]+\.\w+", 0)) \
+      .withColumn("name",       F.regexp_extract("raw", r"^([A-Za-z' ]+?)\s*\|", 1)) \
+      .withColumn("salary_raw", F.regexp_extract("raw", r"\$(\d[\d,]+)", 1)) \
+      .withColumn("salary_num", F.regexp_replace(
+                                    F.regexp_extract("raw", r"\$(\d[\d,]+)", 1),
+                                    r",", "").cast(DoubleType())) \
+      .select("id","name","email","salary_raw","salary_num") \
+      .show(truncate=False)
+
+# ── 9.3 regexp_replace – substitution ────────────────────────────────────────
+# Use case: Mask phone numbers for GDPR; normalise phone format
+print("\n[9.3] regexp_replace:")
+raw_df.withColumn("masked_phone",
+          F.regexp_replace("raw", r"(\+?[\d][\d\s\-().]{6,})", "***-MASKED")) \
+      .withColumn("clean_text",
+          F.regexp_replace("raw", r"[|$,]", "")) \
+      .select("id","masked_phone","clean_text") \
+      .show(truncate=False)
+
+# ── 9.4 regexp_extract_all (Spark 3.1+) ──────────────────────────────────────
+# Use case: Pull all numbers out of a freeform text field
+print("\n[9.4] regexp_extract_all:")
+raw_df.withColumn("all_numbers",
+          F.regexp_extract_all(F.col("raw"), F.lit(r"\d+"), 0)) \
+      .select("id","all_numbers") \
+      .show(truncate=False)
+
+# ── 9.5 Advanced – validate & clean emails ───────────────────────────────────
+# Use case: Data quality check — flag malformed emails before loading to CRM
+print("\n[9.5] Email validation:")
+email_df = spark.createDataFrame([
+    (1,"alice@example.com"),(2,"not-an-email"),(3,"bob@co.uk"),
+    (4,"bad@"),(5,"@nodomain.com"),(6,"valid+tag@corp.org"),
+], ["id","email"])
+email_df.withColumn("is_valid_email",
+    F.col("email").rlike(r"^[\w.%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+).withColumn("domain",
+    F.regexp_extract("email", r"@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})", 1)
+).show()
+
+
+# =============================================================================
+# SECTION 10 – CONDITIONAL FUNCTIONS
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 10 – CONDITIONAL FUNCTIONS")
+print("="*60)
+
+# ── 10.1 when / otherwise ────────────────────────────────────────────────────
+# Use case: Derive pay band for compensation benchmarking
+print("\n[10.1] when / otherwise (pay bands):")
+emp_clean.filter(F.col("salary").isNotNull()).withColumn(
+    "pay_band",
+    F.when(F.col("salary") >= 110000, "Band 5 – Executive")
+     .when(F.col("salary") >= 95000,  "Band 4 – Senior")
+     .when(F.col("salary") >= 80000,  "Band 3 – Mid-Senior")
+     .when(F.col("salary") >= 65000,  "Band 2 – Mid")
+     .otherwise(                      "Band 1 – Junior")
+).select("name","dept","salary","pay_band").show()
+
+# ── 10.2 coalesce ─────────────────────────────────────────────────────────────
+# Use case: Fallback chain: use salary; if null, use dept median; else $0
+print("\n[10.2] coalesce (null fallback chain):")
+emp_clean.withColumn("dept_median", F.lit(82000.0)) \
+         .withColumn("salary_safe",
+             F.coalesce(F.col("salary"), F.col("dept_median"), F.lit(0.0))) \
+         .select("name","salary","dept_median","salary_safe") \
+         .show()
+
+# ── 10.3 nullif / nvl via SQL ─────────────────────────────────────────────────
+# Use case: Treat "Unknown" string as null in downstream aggregations
+print("\n[10.3] nullif / if / nvl via SQL:")
+spark.sql("""
+    SELECT name, dept,
+           NULLIF(dept, 'HR')          AS dept_nullif_hr,
+           IF(salary > 90000, 'High', 'Normal') AS salary_flag,
+           NVL(salary, 0)              AS salary_nvl,
+           NVL2(salary, 'Has salary', 'Missing') AS salary_status,
+           IFNULL(salary, -1)          AS salary_ifnull
+    FROM employees
+""").show()
+
+# ── 10.4 CASE WHEN in SQL CTE ─────────────────────────────────────────────────
+print("\n[10.4] CASE WHEN in SQL:")
+spark.sql("""
+    SELECT name, dept, salary,
+           CASE
+               WHEN salary >= 100000 THEN 'Top Earner'
+               WHEN salary >= 80000  THEN 'Above Average'
+               WHEN salary IS NULL   THEN 'Data Missing'
+               ELSE 'Below Average'
+           END AS earning_label
+    FROM employees
+    ORDER BY salary DESC
+""").show()
+
+
+# =============================================================================
+# SECTION 11 – ARRAY & MAP FUNCTIONS
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 11 – ARRAY & MAP FUNCTIONS")
+print("="*60)
+
+arr_data = [
+    (1, "Alice", [85, 90, 78, 92, 88], {"Python": 5, "Spark": 4, "SQL": 5}),
+    (2, "Bob",   [70, 65, 80, 75],     {"Excel": 3, "SQL": 4}),
+    (3, "Carol", [95, 98, 92, 99, 96], {"Python": 5, "Scala": 4, "Java": 3, "SQL": 5}),
+]
+arr_df = spark.createDataFrame(arr_data,
+    StructType([
+        StructField("id",     IntegerType()),
+        StructField("name",   StringType()),
+        StructField("scores", ArrayType(IntegerType())),
+        StructField("skills", MapType(StringType(), IntegerType())),
+    ])
+)
+
+# ── 11.1 Array functions ──────────────────────────────────────────────────────
+# Use case: Analyse test score arrays — size, min, max, sort, contains
+print("\n[11.1] Array operations:")
+arr_df.withColumn("num_tests",   F.size("scores")) \
+      .withColumn("max_score",   F.array_max("scores")) \
+      .withColumn("min_score",   F.array_min("scores")) \
+      .withColumn("avg_score",   F.round(F.aggregate("scores", F.lit(0),
+                                  lambda acc, x: acc + x) / F.size("scores"), 2)) \
+      .withColumn("sorted_asc",  F.array_sort("scores")) \
+      .withColumn("has_90plus",  F.array_contains("scores", 90)) \
+      .withColumn("unique",      F.array_distinct("scores")) \
+      .select("name","num_tests","max_score","min_score","sorted_asc","has_90plus") \
+      .show(truncate=False)
+
+# ── 11.2 Explode ──────────────────────────────────────────────────────────────
+# Use case: Flatten scores array so each score gets its own row for histogram
+print("\n[11.2] Explode array (one row per score):")
+arr_df.select("name", F.explode("scores").alias("score")).show()
+
+# posexplode – includes position index
+print("  posexplode (with index):")
+arr_df.select("name", F.posexplode("scores").alias("idx","score")).show()
+
+# explode_outer – keeps rows with null/empty arrays
+print("  explode_outer (keeps nulls):")
+arr_df.select("name", F.explode_outer("scores").alias("score")).show()
+
+# ── 11.3 Array transforms (higher-order functions) ───────────────────────────
+# Use case: Apply a curve (+5 pts) to every score without exploding
+print("\n[11.3] Higher-order: transform / filter / forall / exists:")
+arr_df.withColumn("curved",    F.transform("scores", lambda x: x + 5)) \
+      .withColumn("above_80",  F.filter("scores",    lambda x: x >= 80)) \
+      .withColumn("all_pass",  F.forall("scores",    lambda x: x >= 60)) \
+      .withColumn("any_100",   F.exists("scores",    lambda x: x == 100)) \
+      .withColumn("total",     F.aggregate("scores", F.lit(0), lambda acc, x: acc + x)) \
+      .select("name","curved","above_80","all_pass","any_100","total") \
+      .show(truncate=False)
+
+# ── 11.4 Array set operations ─────────────────────────────────────────────────
+# Use case: Find skills that two employees share / one has but not the other
+print("\n[11.4] Array set operations:")
+set_df = spark.createDataFrame([
+    (["Python","Spark","SQL"], ["Python","Java","SQL"])
+], ["skills_a","skills_b"])
+set_df.withColumn("union_skills",    F.array_union("skills_a","skills_b")) \
+      .withColumn("shared_skills",   F.array_intersect("skills_a","skills_b")) \
+      .withColumn("unique_to_a",     F.array_except("skills_a","skills_b")) \
+      .show(truncate=False)
+
+# ── 11.5 Map functions ────────────────────────────────────────────────────────
+# Use case: Extract skill ratings from the map; flag employees with SQL > 4
+print("\n[11.5] Map functions:")
+arr_df.withColumn("sql_level",    F.col("skills").getItem("SQL")) \
+      .withColumn("skill_keys",   F.map_keys("skills")) \
+      .withColumn("skill_vals",   F.map_values("skills")) \
+      .withColumn("skill_count",  F.map_entries("skills")) \
+      .withColumn("sql_expert",   F.col("skills").getItem("SQL") >= 5) \
+      .select("name","sql_level","skill_keys","skill_vals","sql_expert") \
+      .show(truncate=False)
+
+# Explode map → key-value rows
+print("  Explode map (skill × rating rows):")
+arr_df.select("name", F.explode("skills").alias("skill","rating")).show()
+
+
+# =============================================================================
+# SECTION 12 – CTE (COMMON TABLE EXPRESSIONS)
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 12 – CTE")
+print("="*60)
+
+# ── 12.1 Single CTE via SQL ───────────────────────────────────────────────────
+# Use case: Dept summary then rank – avoid repeating the groupBy
+print("\n[12.1] Single CTE – dept salary ranking:")
+spark.sql("""
+    WITH dept_stats AS (
+        SELECT dept,
+               COUNT(*)         AS headcount,
+               ROUND(AVG(salary),2) AS avg_salary,
+               MAX(salary)      AS max_salary,
+               MIN(salary)      AS min_salary
+        FROM employees
+        WHERE salary IS NOT NULL
+        GROUP BY dept
+    )
+    SELECT *,
+           RANK() OVER (ORDER BY avg_salary DESC) AS salary_rank
+    FROM dept_stats
+    ORDER BY salary_rank
+""").show()
+
+# ── 12.2 Chained CTEs ────────────────────────────────────────────────────────
+# Use case: Tag top earner per dept; enrich with dept manager
+print("\n[12.2] Chained CTEs – top earner per dept + manager lookup:")
+spark.sql("""
+    WITH ranked AS (
+        SELECT name, dept, salary,
+               ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) AS rn
+        FROM employees
+        WHERE salary IS NOT NULL
+    ),
+    top_earners AS (
+        SELECT name, dept, salary FROM ranked WHERE rn = 1
+    ),
+    with_manager AS (
+        SELECT t.name, t.dept, t.salary, d.manager, d.office
+        FROM top_earners t
+        LEFT JOIN departments d ON t.dept = d.dept
+    )
+    SELECT dept, name AS top_earner, salary, manager, office
+    FROM with_manager
+    ORDER BY salary DESC
+""").show()
+
+# ── 12.3 CTE with aggregation filter (HAVING equivalent) ─────────────────────
+# Use case: Find depts where max earner earns 30%+ above dept average
+print("\n[12.3] CTE + HAVING – depts with high salary spread:")
+spark.sql("""
+    WITH dept_agg AS (
+        SELECT dept,
+               ROUND(AVG(salary),2) AS avg_sal,
+               MAX(salary)          AS max_sal,
+               COUNT(*)             AS cnt
+        FROM employees
+        WHERE salary IS NOT NULL
+        GROUP BY dept
+    )
+    SELECT dept, avg_sal, max_sal, cnt,
+           ROUND((max_sal - avg_sal) / avg_sal * 100, 1) AS pct_above_avg
+    FROM dept_agg
+    WHERE cnt >= 2
+      AND max_sal > avg_sal * 1.1
+    ORDER BY pct_above_avg DESC
+""").show()
+
+# ── 12.4 CTE equivalent in DataFrame API ─────────────────────────────────────
+# Use case: Same multi-step logic as Python variables (no SQL strings)
+print("\n[12.4] CTE via DataFrame chaining:")
+step1_dept_stats = emp_clean.filter(F.col("salary").isNotNull()).groupBy("dept").agg(
+    F.count("*").alias("headcount"),
+    F.round(F.avg("salary"), 2).alias("avg_salary"),
+    F.max("salary").alias("max_salary"),
+)
+step2_ranked = step1_dept_stats.withColumn(
+    "rank", F.rank().over(Window.orderBy(F.col("avg_salary").desc()))
+)
+step3_final = step2_ranked.join(dept.select("dept","manager"), on="dept", how="left") \
+                          .filter(F.col("headcount") >= 2) \
+                          .orderBy("rank")
+step3_final.show()
+
+
+# =============================================================================
+# SECTION 13 – UDF (USER DEFINED FUNCTIONS)
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 13 – UDF")
+print("="*60)
+
+# ── 13.1 Python UDF ───────────────────────────────────────────────────────────
+# Use case: Apply complex custom salary grading logic not expressible in SQL
+from pyspark.sql.types import StringType, DoubleType as DT
+
+def salary_grade(salary):
+    if salary is None: return "Unknown"
+    if salary >= 110000: return "A+"
+    if salary >= 90000:  return "A"
+    if salary >= 75000:  return "B"
+    if salary >= 65000:  return "C"
+    return "D"
+
+salary_grade_udf = F.udf(salary_grade, StringType())
+
+print("\n[13.1] Python UDF – salary grade:")
+emp_clean.withColumn("grade", salary_grade_udf(F.col("salary"))) \
+         .select("name","dept","salary","grade").show()
+
+# ── 13.2 Pandas UDF (vectorised – much faster) ───────────────────────────────
+# Use case: Normalise salary column using vectorised pandas operations
+import pandas as pd
+from pyspark.sql.functions import pandas_udf
+
+@pandas_udf(DT())
+def normalise_salary(s: pd.Series) -> pd.Series:
+    """Min-max normalise within the batch."""
+    return (s - s.min()) / (s.max() - s.min() + 1e-9)
+
+print("\n[13.2] Pandas UDF – min-max normalise salary:")
+emp_clean.filter(F.col("salary").isNotNull()) \
+         .withColumn("salary_norm", F.round(normalise_salary(F.col("salary")), 4)) \
+         .select("name","dept","salary","salary_norm").show()
+
+# ── 13.3 UDF returning ArrayType ─────────────────────────────────────────────
+# Use case: Tokenise a text column (e.g., job titles) into a word list
+from pyspark.sql.types import ArrayType
+
+@F.udf(ArrayType(StringType()))
+def tokenise(text):
+    if text is None: return []
+    import re
+    return re.sub(r"[^a-zA-Z0-9 ]", "", text.lower()).split()
+
+print("\n[13.3] UDF returning Array – tokenise dept name:")
+emp_clean.withColumn("tokens", tokenise(F.col("dept"))) \
+         .select("name","dept","tokens").show()
+
+# ── 13.4 UDF registration for SQL ────────────────────────────────────────────
+# Use case: Let SQL analysts call the grading function via spark.sql()
+spark.udf.register("salary_grade_sql", salary_grade, StringType())
+print("\n[13.4] Registered UDF in SQL:")
+spark.sql("SELECT name, dept, salary, salary_grade_sql(salary) AS grade FROM employees").show()
+
+
+# =============================================================================
+# SECTION 14 – PERFORMANCE PATTERNS
+# =============================================================================
+print("\n" + "="*60)
+print("SECTION 14 – PERFORMANCE PATTERNS")
+print("="*60)
+
+# ── 14.1 Cache / persist ─────────────────────────────────────────────────────
+# Use case: Cache a heavily reused DataFrame (e.g., dimension table) in memory
+from pyspark import StorageLevel
+
+emp_clean.cache()                                # MEMORY_AND_DISK by default
+emp_clean.persist(StorageLevel.MEMORY_AND_DISK)  # explicit
+emp_clean.count()                                # trigger materialisation
+print("[14.1] DataFrame cached. Partitions:", emp_clean.rdd.getNumPartitions())
+emp_clean.unpersist()                            # release when done
+
+# ── 14.2 Repartition vs coalesce ─────────────────────────────────────────────
+# Use case: Repartition by join key before a large join to avoid data skew
+df_rep = emp_clean.repartition(4, "dept")        # full shuffle, balanced
+df_coal = emp_clean.coalesce(2)                  # reduce partitions, no shuffle
+print("[14.2] Repartitioned:", df_rep.rdd.getNumPartitions(),
+      "| Coalesced:", df_coal.rdd.getNumPartitions())
+
+# ── 14.3 Broadcast join ───────────────────────────────────────────────────────
+# Use case: Join a 10B-row fact table with a 1000-row dimension without shuffling
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "50mb")
+result_bc = emp_clean.join(F.broadcast(dept), on="dept", how="left")
+print("[14.3] Broadcast join complete. Row count:", result_bc.count())
+
+# ── 14.4 Explain / query plan ─────────────────────────────────────────────────
+# Use case: Inspect whether Spark chose a broadcast join or sort-merge join
+print("\n[14.4] Query plan (simple):")
+emp_clean.filter(F.col("salary") > 80000).explain(mode="simple")
+
+# ── 14.5 Salting (skew mitigation) ───────────────────────────────────────────
+# Use case: 90% of rows have dept="Engineering" — salt the key to spread the load
+print("\n[14.5] Salted join to handle data skew:")
+import random
+num_salts = 4
+
+skewed = emp_clean.withColumn(
+    "salt_key",
+    F.concat(F.col("dept"), F.lit("_"), (F.rand(42) * num_salts).cast("int").cast("string"))
+)
+dept_salted = dept.withColumn(
+    "salt",  F.explode(F.array([F.lit(i) for i in range(num_salts)]))
+).withColumn(
+    "salt_key", F.concat(F.col("dept"), F.lit("_"), F.col("salt").cast("string"))
+)
+result_salted = skewed.join(dept_salted, on="salt_key", how="left") \
+                      .drop("salt_key","salt")
+print("  Salted join rows:", result_salted.count())
+
+# ── 14.6 Adaptive Query Execution settings ────────────────────────────────────
+# Use case: Let Spark auto-tune shuffle partition count at runtime
+spark.conf.set("spark.sql.adaptive.enabled",                    "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled",           "true")
+print("\n[14.6] AQE settings applied.")
+
+# ── 14.7 Predicate pushdown (read only needed partitions) ────────────────────
+# Use case: When reading partitioned Parquet, push filters down to file scan
+# spark.read.parquet("s3://bucket/employees_parquet/") \
+#     .filter(F.col("dept") == "Engineering") \   ← pushed to file reader
+#     .show()
+
+print("\n[14.7] Predicate pushdown applies automatically to partitioned reads.")
+
+# =============================================================================
+# END
+# =============================================================================
+print("\n" + "="*60)
+print("Tutorial complete. All sections executed successfully.")
+print("="*60)
+spark.stop()
